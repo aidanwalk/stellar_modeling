@@ -122,7 +122,7 @@ def measure_centroid_shifts(
 if __name__ == "__main__":
     PLATE_SCALE = 5.9  # mas/pixel
     MODEL_BOUNDARY = (652, 660)
-    SAVEFILE = './observed_maps/centroid_shifts.npy'
+    SAVEFILE = './observed_maps/sim_centroid_shifts.npy'
     cm_dir = './observed_maps/'
     ref_dir = './reference_maps/'
     ref_wavefile = './reference_maps/cm_wavelengths.fits'

@@ -250,6 +250,7 @@ if __name__ == "__main__":
     T_file = './renders/rendered_temperature.fits'
     g_file = './renders/rendered_gravity.fits'
     v_rad_file = './renders/rendered_radial_velocity.fits'
+    dim_fac_file = './renders/limb_darken_dimming_factor.fits'
     
     
     os.makedirs(save_dir, exist_ok=True)
@@ -269,6 +270,7 @@ if __name__ == "__main__":
     T_map = fits.getdata(T_file)
     g_map = fits.getdata(g_file)
     v_rad_map = fits.getdata(v_rad_file)
+    dim_fac_map = fits.getdata(dim_fac_file)
     
     # Compute the width of each velocity bin
     v_rad_grad = np.gradient(v_rad_map)
@@ -280,9 +282,11 @@ if __name__ == "__main__":
     spectral_image = np.zeros((target_wave.size, *T_map.shape))
     
     for i, j in yield_pixel_indicies(T_map.shape):
+        print(f"working on pixel ({i}, {j})", end="\r", flush=True)
         local_T = T_map[i, j]
         local_g = g_map[i, j]
         local_v_rad = v_rad_map[i, j]
+        local_dim_fac = dim_fac_map[i, j]
         
         if np.any(np.isnan([local_T, local_g, local_v_rad])):
             continue  # skip pixels with missing data
@@ -322,7 +326,8 @@ if __name__ == "__main__":
         else:
             interp_spec = np.interp(target_wave, spec_wave_shifted, spec)
         
-        spectral_image[:, i, j] = interp_spec
+        # Insert the spectrum into this pixel, and apply limb darkening
+        spectral_image[:, i, j] = interp_spec * local_dim_fac
         
         # plt.plot(spec_wave_shifted, spec, label='Shifted PHOENIX spectrum')
         # plt.plot(spec_wave, spec, label='Original PHOENIX spectrum')

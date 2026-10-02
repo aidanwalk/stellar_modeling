@@ -870,7 +870,7 @@ if __name__ == "__main__":
     inclination = 57.2              # degrees, 0 = pole-on, 90 = edge-on
     position_angle = -62.7          # degrees, 0 = north up, positive eastward
     beta = 0.25                     # UNTESTED FOR VALUES != 0.25; gravity darkening exponent (von Zeipel)
-    project_vcam = False             # Whether to project on-sky or project on vcam (False for on-sky, True for vcam)
+    project_vcam = True             # Whether to project on-sky or project on vcam (False for on-sky, True for vcam)
     derot_ang = 101.34              # degrees, angle to rotate the vcam projection to match on-sky orientation (only used if project_vcam=True)
     rigid = False                    # Whether to treat the star as a rigid rotator (no gravity darkening)    
     # -------------------------------------------------------------------------
@@ -879,9 +879,9 @@ if __name__ == "__main__":
     # rigid = True
     
     # MODEL RESOLUTION --------------------------------------------------------
-    N_grid = 2**6                   # 3D grid resolution (N x N x N)
-    render_resolution = 2**7        # Final rendered image resolution
-    grid_overfill = 1.2            # How much larger the grid should be than the star's polar radius (in units of R_p).
+    N_grid = 2**8                   # 3D grid resolution (N x N x N)
+    render_resolution = 2**6        # Final rendered image resolution
+    grid_overfill = 1.3            # How much larger the grid should be than the star's polar radius (in units of R_p).
     # -------------------------------------------------------------------------
     
     results_dir = './renders'

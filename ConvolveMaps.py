@@ -259,7 +259,7 @@ if __name__ == "__main__":
     stellar_spectral_image_file = './renders/stellar_spectral_image.fits'
     wavelength_grid_file = './renders/wavelength_grid.fits'
 
-    maps_dir = './deshifted_maps'
+    maps_dir = './reference_maps'
     maps_wavefile = './reference_maps/cm_wavelengths.fits'
 
     
@@ -282,7 +282,8 @@ if __name__ == "__main__":
     
     
     # Find reference map file names
-    reference_files = sorted(glob.glob(os.path.join(maps_dir, 'deshifted_map_*.fits')))
+    # reference_files = sorted(glob.glob(os.path.join(maps_dir, 'deshifted_map_*.fits')))
+    reference_files = sorted(glob.glob(os.path.join(maps_dir, 'reference_map_*.fits')))
     ref_wav = fits.getdata(maps_wavefile)
     wave_mask = (ref_wav > wvln_cntl - delta_wvln) & (ref_wav < wvln_cntl + delta_wvln)
     ref_wav_masked = ref_wav[wave_mask]
