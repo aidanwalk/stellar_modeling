@@ -18,6 +18,7 @@ import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from scipy.constants import sigma, G
 from astropy.constants import M_sun, R_sun
+from astropy.io import fits
 
 
 class Stellar3DModel:
@@ -35,7 +36,8 @@ class Stellar3DModel:
         T_eff : float
             Effective temperature (K) — used only for normalizing C_ω
         beta : float, default 0.25
-            Gravity darkening exponent (von Zeipel)
+            Gravity darkening exponent (von Zeipel) -- does not seem to work 
+            well for any value other than 0.25...
         omega_frac : float, default 0.0
             Rotation rate as fraction of critical rotation. Provide either `omega_frac` or `v_rot`.
         v_rot : float, default None
@@ -46,8 +48,9 @@ class Stellar3DModel:
             Resolution of the final rendered image
         overfill : float, default 2.0
             How much larger the grid should be than the star's polar radius (in units of R_p).
+            This is needed because the star bulges at the equator due to rotation.
         rigid : bool, default False
-            If True, the star is treated as a rigid rotator (no gravity darkening).
+            If True, the star is treated as a rigid spherical rotator (no gravity darkening).
         """
         self.M_star = M_star
         self.R_p = R_p
@@ -296,14 +299,6 @@ class Stellar3DModel:
         units are in m/s^2
         """
         self._ensure_grid()
-        
-        # if self.rigid:
-        #     # For rigid rotation, gravity is uniform (no gravity darkening)
-        #     def scalar_func(theta, phi, R_surf):
-        #         g_vec = self.gravitational_acceleration(theta, phi, R_surf)
-        #         return np.linalg.norm(g_vec, axis=-1)
-            
-        #     return self._build_scalar_volume(scalar_func)
 
         def scalar_func(theta, phi, R_surf):
             g_vec = self.gravitational_acceleration(theta, phi, R_surf)
@@ -328,7 +323,7 @@ class Stellar3DModel:
     
     
     
-    def build_radial_velocity_volume(self, inclination, position_angle):
+    def build_radial_velocity_volume(self, inclination, position_angle, differential=False):
         """
         Build 3D radial velocity volume (x, y, z) → v_radial (m/s).
         
@@ -341,19 +336,10 @@ class Stellar3DModel:
         self._ensure_grid()
 
         # Rotation matrix: star frame → observer frame (same as render())
-        PA_rotation_matrix = np.array([
-            [np.cos(np.radians(position_angle)), -np.sin(np.radians(position_angle)), 0],
-            [np.sin(np.radians(position_angle)),  np.cos(np.radians(position_angle)), 0],
-            [0, 0, 1]
-        ])
-        inclination_rotation_matrix = np.array([
-            [1, 0, 0],
-            [0, np.cos(np.radians(inclination)), -np.sin(np.radians(inclination))],
-            [0, np.sin(np.radians(inclination)),  np.cos(np.radians(inclination))]
-        ])
-        R = PA_rotation_matrix @ inclination_rotation_matrix   # (3, 3)
-
-        def scalar_func(theta, phi, R_surf):
+        R = rotation_matrix(inclination, position_angle)
+        
+        
+        def rigid_body_rotation(theta, phi, R_surf):
             # Rotational velocity magnitude at this latitude
             v_eq = self.omega * R_surf * np.sin(theta)          # scalar, shape (...)
 
@@ -366,6 +352,30 @@ class Stellar3DModel:
             ], axis=-1)   # shape (..., 3)
 
             v_rot_star = v_eq[..., None] * v_unit   # (..., 3)
+            return v_rot_star
+        
+        
+        def solar_differential_rotation(theta, phi, R_surf):
+            # Solar-like differential rotation: faster at equator, slower at poles
+            # Eq for omega taken from Eq (4) Ellwarth et al. 2023 A&A
+            omega = 14.714 - 2.396 * np.sin(theta)**2 - 1.787 * np.sin(theta)**4  # in degrees/day
+            omega_rad = np.radians(omega) / (24 * 3600)  # convert to rad/s
+            v_eq = omega_rad * R_surf * np.sin(theta)  # scalar, shape (...)
+            
+            v_unit = np.stack([
+                -np.sin(phi),      # x-component
+                np.cos(phi),      # y-component
+                np.zeros_like(phi)  # z-component
+            ], axis=-1)   # shape (..., 3)
+            v_rot_star = v_eq[..., None] * v_unit   # (..., 3)
+            return v_rot_star
+        
+
+        def scalar_func(theta, phi, R_surf):
+            if not differential:
+                v_rot_star = rigid_body_rotation(theta, phi, R_surf)
+            else:
+                v_rot_star = solar_differential_rotation(theta, phi, R_surf)
 
             # Transform to observer frame
             v_rot_obs = v_rot_star @ R.T            # (..., 3)
@@ -374,6 +384,81 @@ class Stellar3DModel:
             # After the rotation matrix used in your render_object(), 
             # this is the **third component** (Z in camera space).
             return v_rot_obs[..., 2]
+
+        return self._build_scalar_volume(scalar_func)
+    
+    
+    
+    def build_heliocentric_radii_volume(self, inclination, position_angle):
+        """
+        Builds a 3D volume of the heliocentric radii (z/R_star) for each point 
+        in the grid. 
+        """
+        
+        self._ensure_grid()
+
+        # Rotation matrix: star frame → observer frame (same as render())
+        R = rotation_matrix(inclination, position_angle)
+
+        def scalar_func(theta, phi, R_surf):
+            # The heliocentric radius is just the Z coordinate in the observer's frame
+            # after applying the same rotation as in render(). Since the rotation matrix
+            # is orthogonal, we can directly compute the Z component without full matrix multiplication.
+            
+            # Original coordinates in star frame
+            x_star = R_surf * np.sin(theta) * np.cos(phi)
+            y_star = R_surf * np.sin(theta) * np.sin(phi)
+            z_star = R_surf * np.cos(theta)
+
+            # Apply rotation to get observer frame coordinates
+            # x_obs = (R[0, 0] * x_star + R[0, 1] * y_star + R[0, 2] * z_star)
+            # y_obs = (R[1, 0] * x_star + R[1, 1] * y_star + R[1, 2] * z_star)
+            z_obs = (R[2, 0] * x_star + R[2, 1] * y_star + R[2, 2] * z_star)
+
+            # Normalize by polar radius to get dimensionless heliocentric radius
+            return -z_obs / self.R_p
+
+        return self._build_scalar_volume(scalar_func)
+    
+    
+    
+    
+    def build_mu_volume(self, inclination, position_angle):
+        """
+        Builds a 3D volume of the cosine of the angle between the local surface normal
+        and the line of sight (mu) for each point in the grid.
+        """
+        self._ensure_grid()
+
+        # Rotation matrix: star frame → observer frame (same as render())
+        R = rotation_matrix(inclination, position_angle)
+
+        # Semi-axes of the (oblate) star in the same units as R_surface / R_p
+        R_eq = np.nanmax(self.R_surface)          # equatorial radius
+        R_p  = self.R_p                           # polar radius
+
+        def scalar_func(theta, phi, R_surf):
+            # Cartesian coordinates on the surface (star frame)
+            x = R_surf * np.sin(theta) * np.cos(phi)
+            y = R_surf * np.sin(theta) * np.sin(phi)
+            z = R_surf * np.cos(theta)
+
+            # Un-normalised surface normal for an ellipsoid of revolution
+            # n ∝ (x/a², y/a², z/c²)
+            n_star = np.stack([
+                x / R_eq**2,
+                y / R_eq**2,
+                z / R_p**2
+            ], axis=-1)
+
+            # Unit normal
+            n_star /= np.linalg.norm(n_star, axis=-1, keepdims=True)
+
+            # Transform normal into the observer frame
+            n_obs = n_star @ R.T          # (..., 3)
+
+            # μ = cos γ = n · line-of-sight  (LOS = -Z in camera space)
+            return -n_obs[..., 2]
 
         return self._build_scalar_volume(scalar_func)
     
@@ -417,18 +502,7 @@ class Stellar3DModel:
             raise RuntimeError("Build a volume first using build_temperature_volume(), "
                              "build_gravity_volume(), or build_radial_velocity_volume().")
 
-        # Same rotation matrix as before
-        PA_rotation_matrix = np.array([
-            [np.cos(np.radians(position_angle)), -np.sin(np.radians(position_angle)), 0],
-            [np.sin(np.radians(position_angle)),  np.cos(np.radians(position_angle)), 0],
-            [0, 0, 1]
-        ])
-        inclination_rotation_matrix = np.array([
-            [1, 0, 0],
-            [0, np.cos(np.radians(inclination)), -np.sin(np.radians(inclination))],
-            [0, np.sin(np.radians(inclination)),  np.cos(np.radians(inclination))]
-        ])
-        R = PA_rotation_matrix @ inclination_rotation_matrix
+        R = rotation_matrix(inclination, position_angle)
 
         if project_vcam:
             R = get_vcam_projection_matrix(vcam_derot_ang) @ R
@@ -464,18 +538,7 @@ class Stellar3DModel:
         if self.x is None:
             self._ensure_grid()
 
-        # Build the same rotation matrix as in render()
-        PA_rotation_matrix = np.array([
-            [np.cos(np.radians(position_angle)), -np.sin(np.radians(position_angle)), 0],
-            [np.sin(np.radians(position_angle)),  np.cos(np.radians(position_angle)), 0],
-            [0, 0, 1]
-        ])
-        inclination_rotation_matrix = np.array([
-            [1, 0, 0],
-            [0, np.cos(np.radians(inclination)), -np.sin(np.radians(inclination))],
-            [0, np.sin(np.radians(inclination)),  np.cos(np.radians(inclination))]
-        ])
-        R = PA_rotation_matrix @ inclination_rotation_matrix
+        R = rotation_matrix(inclination, position_angle)
 
         if project_vcam:
             R = get_vcam_projection_matrix(vcam_derot_ang) @ R
@@ -499,6 +562,49 @@ class Stellar3DModel:
         pixel_scale = max_span / self.render_resolution   # meters per pixel
 
         return pixel_scale
+    
+    
+    
+    def write_render(self, image, filename, bunit, pixel_scale, inclination, position_angle, overwrite=False):
+        """
+        Write the rendered image to a FITS file.
+        
+        Parameters:
+        -----------
+        image : array-like
+            The rendered image data to be written to the FITS file.
+        filename : str
+            Path to the output FITS file.
+        bunit : str
+            The unit of the image data. Units should be:
+            radial velocity = 'km/s'
+            heliocentric radii = 'z/R_star'
+            temperature = 'K'
+            surface gravity = 'log10(cm/s^2)'
+        pixel_scale : float
+            The pixel scale of the image in meters per pixel.
+        inclination : float
+            Inclination angle in degrees (0 = pole-on, 90 = edge-on)
+        position_angle : float
+            Position angle in degrees (0 = north up, positive eastward)
+        overwrite : bool, optional
+            Whether to overwrite the existing file if it exists. Default is False.
+        """
+        
+        fits.writeto(
+            filename, 
+            data = image.astype(np.float32), 
+            header = fits.Header({
+                'BUNIT': bunit,
+                'PXSCALE': pixel_scale,  # meters per pixel
+                'PXUNIT': 'm/pixel',
+                'COMMENT': 'Rendered radial velocity image from Stellar3DModel',
+                'COMMENT': f'Model parameters: M={self.M_star:.2e} kg, R_p={self.R_p:.2e} m, T_eff={self.T_eff} K, beta={self.beta}, omega={self.omega}, inclination={inclination} deg, PA={position_angle} deg',
+            }),
+            overwrite=overwrite
+        )
+        
+        return
     
     # ------------------------------------------------------------------
     # Surface projection utilities
@@ -700,6 +806,11 @@ def render_object(x, y, z, c, R, resolution=256, mode="surface",
 
 
 
+
+        
+
+
+
 def get_vcam_projection_matrix(derot_ang):
     # Mirror across x-axis 
     mirror_x = np.array([[1.0,  0.0, 0.0],
@@ -727,6 +838,25 @@ def get_vcam_projection_matrix(derot_ang):
 
 
 
+
+def rotation_matrix(inclination, position_angle):
+    """
+    Build a 3D rotation matrix for the given inclination and position angle. 
+    """
+    
+    PA_rotation_matrix = np.array([
+        [np.cos(np.radians(position_angle)), -np.sin(np.radians(position_angle)), 0],
+        [np.sin(np.radians(position_angle)),  np.cos(np.radians(position_angle)), 0],
+        [0, 0, 1]
+    ])
+    inclination_rotation_matrix = np.array([
+        [1, 0, 0],
+        [0, np.cos(np.radians(inclination)), -np.sin(np.radians(inclination))],
+        [0, np.sin(np.radians(inclination)),  np.cos(np.radians(inclination))]
+    ])
+    return PA_rotation_matrix @ inclination_rotation_matrix
+
+
 # ----------------------------------------------------------------------
 # Example usage -- Lets generate an on-sky image
 # ----------------------------------------------------------------------
@@ -737,10 +867,10 @@ if __name__ == "__main__":
     R_p = 1.634 * R_sun.value       # polar radius of the star in meters
     T_eff = 7550.0                  # K, effective temperature (used only for normalizing C_omega)
     omega_frac = 0.923              # Fraction of critical rotation
-    # inclination = 57.2              # degrees, 0 = pole-on, 90 = edge-on
+    inclination = 57.2              # degrees, 0 = pole-on, 90 = edge-on
     position_angle = -62.7          # degrees, 0 = north up, positive eastward
     beta = 0.25                     # UNTESTED FOR VALUES != 0.25; gravity darkening exponent (von Zeipel)
-    project_vcam = True             # Whether to project on-sky or project on vcam (False for on-sky, True for vcam)
+    project_vcam = False             # Whether to project on-sky or project on vcam (False for on-sky, True for vcam)
     derot_ang = 101.34              # degrees, angle to rotate the vcam projection to match on-sky orientation (only used if project_vcam=True)
     rigid = False                    # Whether to treat the star as a rigid rotator (no gravity darkening)    
     # -------------------------------------------------------------------------
@@ -749,9 +879,9 @@ if __name__ == "__main__":
     # rigid = True
     
     # MODEL RESOLUTION --------------------------------------------------------
-    N_grid = 2**5                   # 3D grid resolution (N x N x N)
-    render_resolution = 2**5        # Final rendered image resolution
-    grid_overfill = 1.1            # How much larger the grid should be than the star's polar radius (in units of R_p).
+    N_grid = 2**6                   # 3D grid resolution (N x N x N)
+    render_resolution = 2**7        # Final rendered image resolution
+    grid_overfill = 1.2            # How much larger the grid should be than the star's polar radius (in units of R_p).
     # -------------------------------------------------------------------------
     
     results_dir = './renders'
@@ -772,7 +902,7 @@ if __name__ == "__main__":
     T_vol = model.build_temperature_volume()
     g_vol = model.build_gravity_volume()
     v_rad_vol = model.build_radial_velocity_volume(inclination, position_angle)
-    
+    mu_vol = model.build_mu_volume(inclination, position_angle)
 
     # Render images of the stellar surface for each volume
     image_T = model.render(T_vol, inclination, position_angle,
@@ -784,6 +914,9 @@ if __name__ == "__main__":
     image_vrad = model.render(v_rad_vol, inclination, position_angle,
                               mode="surface", threshold=1e-3, 
                               project_vcam=project_vcam, vcam_derot_ang=derot_ang)
+    image_mu = model.render(mu_vol, inclination, position_angle,
+                               mode="surface", threshold=0.01,
+                               project_vcam=project_vcam, vcam_derot_ang=derot_ang)
 
     pixel_scale = model.get_pixel_scale(inclination, position_angle,
                                     project_vcam=project_vcam,
@@ -807,49 +940,17 @@ if __name__ == "__main__":
     image_vrad /= 1e3  # convert to km/s for better visualization
     image_g = np.log10(image_g * 1e2)  # convert to log10(g/cm/s^2) for better visualization
     
+    # linear limb darkening law
+    x = 0.54
+    dimming_factor = 1 - x*(1-image_mu)
     
     
     
     # Save rendered images as fits --------------------------------------------
-    from astropy.io import fits
-    fits.writeto(
-        os.path.join(results_dir, 'rendered_temperature.fits'), 
-        data = image_T.astype(np.float32), 
-        header = fits.Header({
-            'BUNIT': 'K',
-            'PXSCALE': pixel_scale,  # meters per pixel
-            'PXUNIT': 'm/pixel',
-            'COMMENT': 'Rendered temperature image from Stellar3DModel',
-            'COMMENT': f'Model parameters: M={M_star:.2e} kg, R_p={R_p:.2e} m, T_eff={T_eff} K, beta={model.beta}, omega_frac={omega_frac}, inclination={inclination} deg, PA={position_angle} deg',
-        }),
-        overwrite=True
-    )
-    
-    fits.writeto(
-        os.path.join(results_dir, 'rendered_gravity.fits'), 
-        data = image_g.astype(np.float32), 
-        header = fits.Header({
-            'BUNIT': 'log10(cm/s^2)',
-            'PXSCALE': pixel_scale,  # meters per pixel
-            'PXUNIT': 'm/pixel',
-            'COMMENT': 'Rendered gravity image from Stellar3DModel (log10 scale)',
-            'COMMENT': f'Model parameters: M={M_star:.2e} kg, R_p={R_p:.2e} m, T_eff={T_eff} K, beta={model.beta}, omega_frac={omega_frac}, inclination={inclination} deg, PA={position_angle} deg',
-        }), 
-        overwrite=True
-    )
-    
-    fits.writeto(
-        os.path.join(results_dir, 'rendered_radial_velocity.fits'), 
-        data = image_vrad.astype(np.float32), 
-        header = fits.Header({
-            'BUNIT': 'km/s',
-            'PXSCALE': pixel_scale,  # meters per pixel
-            'PXUNIT': 'm/pixel',
-            'COMMENT': 'Rendered radial velocity image from Stellar3DModel',
-            'COMMENT': f'Model parameters: M={M_star:.2e} kg, R_p={R_p:.2e} m, T_eff={T_eff} K, beta={model.beta}, omega_frac={omega_frac}, inclination={inclination} deg, PA={position_angle} deg',
-        }),
-        overwrite=True
-    )
+    model.write_render(image_T, os.path.join(results_dir, 'rendered_temperature.fits'), 'K', pixel_scale, inclination, position_angle, overwrite=True)
+    model.write_render(image_g, os.path.join(results_dir, 'rendered_gravity.fits'), 'log10(cm/s^2)', pixel_scale, inclination, position_angle, overwrite=True)
+    model.write_render(image_vrad, os.path.join(results_dir, 'rendered_radial_velocity.fits'), 'km/s', pixel_scale, inclination, position_angle, overwrite=True)
+    model.write_render(dimming_factor, os.path.join(results_dir, 'limb_darken_dimming_factor.fits'), 'I_obs/I_0', pixel_scale, inclination, position_angle, overwrite=True)
     
     # -------------------------------------------------------------------------
     
